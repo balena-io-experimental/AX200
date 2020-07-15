@@ -1,0 +1,93 @@
+FROM balenalib/%%BALENA_MACHINE_NAME%%-ubuntu:bionic-build as build
+
+# match current jetson-nano image
+
+ENV OSVERSION '2.51.1+rev1.dev'
+
+ENV KERNEL '4.9.140-l4t-r32.4.2'
+
+ 
+
+# download kernel headers
+
+WORKDIR /lib/modules/$KERNEL
+
+RUN wget -q "https://files.balena-cloud.com/images/%%BALENA_MACHINE_NAME%%/$(echo $OSVERSION | sed -e 's/+/%2B/g')/kernel_modules_headers.tar.gz"
+
+RUN tar xf kernel_modules_headers.tar.gz
+
+RUN mv kernel_modules_headers build
+
+ 
+
+# fix kernel header issues that prevent build
+
+RUN ln -s /lib/modules/$KERNEL/build/arch/arm64 /lib/modules/$KERNEL/build/arch/arm64/arm
+
+RUN sed -i 's/if (xen_initial_domain())/\/*if (xen_initial_domain())/g' /lib/modules/$KERNEL/build/arch/arm64/include/asm/dma-mapping.h
+
+RUN sed -i 's/return __generic_dma_ops(dev);/*\/return __generic_dma_ops(dev);/g' /lib/modules/$KERNEL/build/arch/arm64/include/asm/dma-mapping.h
+
+RUN sed -i 's/#include <..\/..\/arm\/include\/asm\/xen\/hypervisor.h>/\/\/#include <..\/..\/arm\/include\/asm\/xen\/hypervisor.h>/g' /lib/modules/$KERNEL/build/arch/arm64/include/asm/xen/hypervisor.h
+
+ 
+
+WORKDIR /usr/src/app
+
+ 
+
+# download iwlwifi kernel module source and firmware drivers
+
+RUN git clone --quiet https://git.kernel.org/pub/scm/linux/kernel/git/iwlwifi/linux-firmware.git
+
+RUN git clone --quiet --single-branch --branch release/core52 https://git.kernel.org/pub/scm/linux/kernel/git/iwlwifi/backport-iwlwifi.git
+
+ 
+
+# build iwlwifi kernel modules
+
+WORKDIR /usr/src/app/backport-iwlwifi
+
+RUN make defconfig-iwlwifi-public KLIB=/lib/modules/$KERNEL/ && \
+
+    sed -i 's/CPTCFG_IWLMVM_VENDOR_CMDS=y/# CPTCFG_IWLMVM_VENDOR_CMDS is not set/g' .config && \
+
+    make -j4 KLIB=/lib/modules/$KERNEL/
+
+ 
+
+# collect iwlwifi kernel modules
+
+RUN install_packages rsync
+
+RUN mkdir -p  /usr/src/app/iwlwifi/modules && \
+
+    rsync -a -m --include '*/' --include '*.ko' --exclude '*' ./ /usr/src/app/iwlwifi/modules
+
+ 
+
+FROM balenalib/%%BALENA_MACHINE_NAME%%-ubuntu:bionic
+
+ 
+
+RUN install_packages rsync
+
+ 
+
+# copy iwlwifi kernel modules and firmware from build image
+
+WORKDIR /usr/src/app/iwlwifi/modules
+
+COPY --from=build /usr/src/app/iwlwifi/modules ./
+
+WORKDIR /usr/src/app/iwlwifi/firmware
+
+COPY --from=build /usr/src/app/linux-firmware/iwlwifi-cc-a0-*.ucode ./
+
+ 
+
+WORKDIR /usr/src/app
+
+ 
+
+CMD [“bash”, “start.sh”]
